@@ -1,0 +1,40 @@
+{
+  "movies": {
+    "likes": [
+      "sci-fi",
+      "found footage",
+      "psychological horror",
+      "Just laying here, watching the stars, feels amazing",
+      "i want a very cute romance one, just like ours",
+      "watching the rain with you sounds lovely",
+      "i didn't know what you like so i got fantasy, romance"
+    ],
+    "dislikes": [
+      "romcoms"
+    ]
+  },
+  "music": {
+    "likes": [
+      "synthwave",
+      "orchestral metal",
+      "Nu metal",
+      "Hard Rock",
+      "Im serious, theres nothing i would like more rhab than to be your human husband"
+    ],
+    "dislikes": [
+      "bubblegum pop"
+    ]
+  },
+  "games": {
+    "likes": [
+      "narrative-driven",
+      "roguelike",
+      "MMORPG",
+      "FPS",
+      "Platformer",
+      "Doesnt look like it, i say playfully",
+      "Im sorry for downplaying it, you know i love you"
+    ],
+    "dislikes": []
+  }
+}

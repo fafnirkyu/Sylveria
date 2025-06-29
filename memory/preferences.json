@@ -1,0 +1,14 @@
+{
+  "movies": {
+    "likes": [],
+    "dislikes": []
+  },
+  "music": {
+    "likes": [],
+    "dislikes": []
+  },
+  "games": {
+    "likes": [],
+    "dislikes": []
+  }
+}
