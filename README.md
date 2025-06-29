@@ -32,15 +32,17 @@
 
 ## 🔌 Plugin Architecture
 
+
 Sylveria supports plugin-based extension through a modular system. Current plugins include:
 
 - 🎧 **Spotify Plugin** — Play, pause, and control music with voice.
 - 🌐 **Web Search Plugin** — Ask general questions via DuckDuckGo or other engines.
-- ☁️ **Weather Plugin** — Get live weather reports via `wttr.in`.
+- ☁️ **Weather Plugin** — Get live weather reports via `wttr.in`.  
+  Automatically detects the user's city via IP-based geolocation for default responses.
 - 📅 **Google Calendar Plugin** — Manage events, reminders, and schedules.
 - 💬 **Twitch Chat Integration** — Let Sylveria act as a co-streamer and chatbot on your Twitch channel.
 - 🤖 **Discord Bot Plugin** — Interact with Sylveria via a Discord bot.
-
+- 🐍 **Script Runner Plugin** — Sylveria can execute custom Python scripts placed in the `scripts/` folder using natural language instructions.
 ---
 
 ## 🧩 Project Structure
