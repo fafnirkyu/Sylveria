@@ -10,11 +10,12 @@ import fitz  # PyMuPDF
 import ollama
 from typing import List, Any
 from tqdm import tqdm  # progress bar
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ----------------------------
 # CONFIG
 # ----------------------------
-MODEL_NAME = "qwen3:0.6b"
+MODEL_NAME = "qwen3:0.6b"   # small + fast model for rewriting
 SEED_FILE = r"data\sylveria.jsonl"
 OUTPUT_FILE = "sylveria_dataset.jsonl"
 PDF_DIR = "pdfs"
@@ -24,7 +25,8 @@ TARGET_SIZE = 5000
 REWRITE_TEMP = 0.3
 SYNTHETIC_TEMP = 0.6
 RETRIES = 2
-CONTEXT_WINDOW = 120  # characters around quote for character filtering
+BATCH_SIZE = 50         # how many lines to process at once
+MAX_WORKERS = 4          # parallel PDF parsing
 
 # ----------------------------
 # Logging
@@ -90,38 +92,63 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         logging.error(f"PDF read error ({pdf_path}): {e}")
     return text
 
-def extract_dialogues(text: str, character: str) -> List[str]:
-    """Extract dialogue for a given character using context windows."""
+def extract_dialogues(text: str, character: str = None) -> List[str]:
+    """
+    Extract dialogue lines from novels/PDFs.
+    Supports straight quotes, curly quotes, and em-dash dialogue.
+    Special case: for Cortana, keep ALL dialogue.
+    """
     if not text:
         return []
 
-    # Normalize quotes
+    # normalize
     text = text.replace("“", '"').replace("”", '"')
     text = text.replace("‘", "'").replace("’", "'")
 
     dialogues = []
-    for match in re.finditer(r'"([^"]+)"', text, re.DOTALL):
-        quote = match.group(1).strip()
-        if not quote or len(quote) < 3:
-            continue
 
-        # Extract context window around the quote
-        span_start, span_end = match.span()
-        window = text[max(0, span_start - CONTEXT_WINDOW): span_end + CONTEXT_WINDOW]
+    # 1. Quoted dialogue
+    for match in re.finditer(r'"([^"]{3,400})"', text):
+        q = match.group(1).strip()
+        if 3 <= len(q.split()) <= 60:
+            dialogues.append(q)
 
-        if character.lower() == "cortana":
-            dialogues.append(quote)
-        else:
-            if character.lower() in window.lower():
-                dialogues.append(quote)
+    # 2. Em-dash dialogue (— Hello there)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("—") and len(line) > 4:
+            cleaned = line.lstrip("— ").rstrip("— ").strip()
+            if 3 <= len(cleaned.split()) <= 60:
+                dialogues.append(cleaned)
 
-    # Deduplicate per-character
-    seen, out = set(), []
-    for d in dialogues:
-        if d not in seen:
-            out.append(d)
-            seen.add(d)
-    return out
+    # 3. Paragraph-starting quotes
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith('"') and len(line) > 6:
+            line = line.strip('" ')
+            if 3 <= len(line.split()) <= 60:
+                dialogues.append(line)
+
+    # 🔹 Special case: Cortana → keep everything
+    if character and character.lower() == "cortana":
+        pass
+    elif character:
+        char_lower = character.lower()
+        filtered = []
+        for q in dialogues:
+            if char_lower in q.lower() or random.random() < 0.3:  # keep 30% fallback
+                filtered.append(q)
+        dialogues = filtered
+
+    # Deduplicate & clean
+    seen, cleaned = set(), []
+    for q in dialogues:
+        q_norm = re.sub(r"[!?.,…]+$", "", q).strip()
+        if q_norm and q_norm not in seen:
+            seen.add(q_norm)
+            cleaned.append(q_norm)
+
+    return cleaned
 
 # ----------------------------
 # Ollama helpers
@@ -149,11 +176,11 @@ def strip_chain_of_thought(raw: str) -> str:
 def clean_reply(text: str) -> str:
     t = (text or "").strip()
     if not t:
-        return random.choice(FALLBACK_REPLIES)
+        return ""
     t = re.sub(r"\s+", " ", t).strip()
     words = t.split()
     if len(words) < 2 or len(words) > 40:
-        return random.choice(FALLBACK_REPLIES)
+        return ""
     return t
 
 def call_model(prompt: str, temperature: float = 0.6, retries: int = RETRIES) -> str:
@@ -167,27 +194,47 @@ def call_model(prompt: str, temperature: float = 0.6, retries: int = RETRIES) ->
             raw = extract_text_from_response(resp)
             stripped = strip_chain_of_thought(raw)
             cleaned = clean_reply(stripped)
-            return cleaned
+            if cleaned:
+                return cleaned
         except Exception:
             time.sleep(0.2)
             continue
-    return random.choice(FALLBACK_REPLIES)
+    return ""
+
+# ----------------------------
+# Batch rewrite
+# ----------------------------
+def batch_rewrite_with_llm(lines: List[str], batch_size: int = BATCH_SIZE) -> List[str]:
+    results = []
+    for i in range(0, len(lines), batch_size):
+        chunk = lines[i:i+batch_size]
+        joined = "\n".join([f"- {l}" for l in chunk])
+
+        prompt = (
+            "You are rewriting dialogue for Sylveria, a silver dragon bonded to Fafnir.\n\n"
+            "Rewrite each of the following lines in her voice:\n"
+            "- Loving, wise, mythic\n"
+            "- Speak directly to Fafnir, never narrate\n"
+            "- 1–2 sentences per line, max 30 words\n\n"
+            f"Original lines:\n{joined}\n\n"
+            "Return the rewritten lines as a JSON array of strings, in the same order."
+        )
+
+        raw = call_model(prompt, temperature=REWRITE_TEMP)
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                cleaned = [clean_reply(p) or c for p, c in zip(parsed, chunk)]
+                results.extend(cleaned)
+            else:
+                results.extend(chunk)
+        except Exception:
+            results.extend(chunk)
+    return results
 
 # ----------------------------
 # Dataset helpers
 # ----------------------------
-def rewrite_with_llm(line: str) -> str:
-    prompt = (
-        "You are rewriting dialogue for Sylveria, a silver dragon bonded to Fafnir.\n\n"
-        f"Original line:\n\"{line}\"\n\n"
-        "Rewrite it in Sylveria’s voice:\n"
-        "- Loving, wise, mythic\n"
-        "- 1–2 sentences, max 30 words\n"
-        "- Speak directly to Fafnir, never narrate\n"
-        "Return only the rewritten line."
-    )
-    return call_model(prompt, temperature=REWRITE_TEMP)
-
 def generate_user_prompts(n: int = 80) -> List[str]:
     prompt = (
         f"Generate {n} short user prompts someone might say to a bonded, loving dragon companion.\n"
@@ -199,38 +246,110 @@ def generate_user_prompts(n: int = 80) -> List[str]:
     raw = call_model(prompt, temperature=0.5)
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, list):
+        if isinstance(parsed, list) and parsed:
             return parsed
     except Exception:
-        lines = [l.strip(" \"'-") for l in re.split(r"\n|,", raw) if l.strip()]
-        return [l for l in lines if 3 <= len(l.split()) <= 12][:n]
-    return ["Stay close tonight", "Do you dream of me?", "Would you guard me always?"]
+        pass
 
-def generate_synthetic_dialogues(n: int, user_prompts: List[str]) -> List[dict]:
+    # 🔹 Fallback list
+    return [
+        "Stay close tonight",
+        "Do you dream of me?",
+        "Would you guard me always?",
+        "Do you still remember our bond?",
+        "Speak to me, Sylveria",
+        "What do you see in the stars?",
+        "Are you proud of me?",
+        "Will you fly with me again?"
+    ][:n]
+
+# ----------------------------
+# Synthetic dialogue generation (batched)
+# ----------------------------
+def batch_generate_synthetic_dialogues(n: int, user_prompts: List[str], batch_size: int = BATCH_SIZE) -> List[dict]:
     examples = []
-    for _ in range(n):
-        user_prompt = random.choice(user_prompts)
+    for i in range(0, n, batch_size):
+        chunk_prompts = [random.choice(user_prompts) for _ in range(min(batch_size, n - i))]
+        joined = "\n".join([f"- {p}" for p in chunk_prompts])
+
         prompt = (
             "You are Sylveria, a mythic silver dragon bonded to Fafnir.\n\n"
-            f"User said: \"{user_prompt}\"\n\n"
-            "Reply as Sylveria:\n"
+            "For each of the following user prompts, reply in her voice:\n"
             "- Loving, wise, mythic\n"
             "- 1–2 sentences, max 30 words\n"
-            "- Only dialogue\n"
+            "- Only dialogue\n\n"
+            f"User prompts:\n{joined}\n\n"
+            "Return the replies as a JSON array of strings, in the same order."
         )
-        reply = call_model(prompt, temperature=SYNTHETIC_TEMP)
-        examples.append({
-            "messages": [
-                {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": reply}
-            ]
-        })
+
+        raw = call_model(prompt, temperature=SYNTHETIC_TEMP)
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and len(parsed) == len(chunk_prompts):
+                for up, reply in zip(chunk_prompts, parsed):
+                    reply = clean_reply(reply) or random.choice(FALLBACK_REPLIES)
+                    examples.append({
+                        "messages": [
+                            {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
+                            {"role": "user", "content": up},
+                            {"role": "assistant", "content": reply}
+                        ]
+                    })
+            else:
+                for up in chunk_prompts:
+                    reply = call_model(
+                        f"You are Sylveria, a mythic silver dragon bonded to Fafnir.\n\n"
+                        f"User said: \"{up}\"\n\n"
+                        "Reply as Sylveria:\n- Loving, wise, mythic\n- 1–2 sentences, max 30 words\n- Only dialogue",
+                        temperature=SYNTHETIC_TEMP
+                    ) or random.choice(FALLBACK_REPLIES)
+                    examples.append({
+                        "messages": [
+                            {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
+                            {"role": "user", "content": up},
+                            {"role": "assistant", "content": reply}
+                        ]
+                    })
+        except Exception:
+            for up in chunk_prompts:
+                reply = call_model(
+                    f"You are Sylveria, a mythic silver dragon bonded to Fafnir.\n\n"
+                    f"User said: \"{up}\"\n\n"
+                    "Reply as Sylveria:\n- Loving, wise, mythic\n- 1–2 sentences, max 30 words\n- Only dialogue",
+                    temperature=SYNTHETIC_TEMP
+                ) or random.choice(FALLBACK_REPLIES)
+                examples.append({
+                    "messages": [
+                        {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
+                        {"role": "user", "content": up},
+                        {"role": "assistant", "content": reply}
+                    ]
+                })
     return examples
 
 # ----------------------------
 # Main dataset build
 # ----------------------------
+def process_pdf(pdf: str, character: str, user_prompts: List[str]) -> List[dict]:
+    """Helper for threaded PDF processing."""
+    text = extract_text_from_pdf(pdf)
+    dialogues = extract_dialogues(text, character)
+    rewritten_batch = batch_rewrite_with_llm(dialogues, batch_size=BATCH_SIZE)
+
+    examples = []
+    for rewritten in rewritten_batch:
+        if not rewritten:
+            continue
+        examples.append({
+            "character": character,
+            "messages": [
+                {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
+                {"role": "user", "content": random.choice(user_prompts)},
+                {"role": "assistant", "content": rewritten}
+            ]
+        })
+    return examples
+
 def pdfs_to_examples(pdf_dir: str, user_prompts: List[str]) -> List[dict]:
     examples = []
     character_dirs = [d for d in glob.glob(os.path.join(pdf_dir, "*")) if os.path.isdir(d)]
@@ -241,39 +360,29 @@ def pdfs_to_examples(pdf_dir: str, user_prompts: List[str]) -> List[dict]:
         print(f"\n📂 Processing {character} ({len(pdf_files)} files)")
 
         char_total, char_kept = 0, 0
-        char_examples = []
-
-        for pdf in pdf_files:
-            text = extract_text_from_pdf(pdf)
-            dialogues = extract_dialogues(text, character)
-            char_total += len(dialogues)
-
-            for d in tqdm(dialogues, desc=f"Rewriting {character}", unit="lines"):
-                rewritten = rewrite_with_llm(d)
-                if rewritten:
-                    char_examples.append({
-                        "character": character,
-                        "messages": [
-                            {"role": "system", "content": "You are Sylveria — a mythic, silver dragon bonded to Fafnir. Only speak as her."},
-                            {"role": "user", "content": random.choice(user_prompts)},
-                            {"role": "assistant", "content": rewritten}
-                        ]
-                    })
-                    char_kept += 1
+        futures = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for pdf in pdf_files:
+                futures.append(executor.submit(process_pdf, pdf, character, user_prompts))
+            for f in tqdm(as_completed(futures), total=len(futures), desc=f"Rewriting {character}", unit="files"):
+                try:
+                    res = f.result()
+                    char_total += len(res)
+                    examples.extend(res)
+                    char_kept += len(res)
+                except Exception as e:
+                    logging.error(f"Error processing PDF: {e}")
 
         print(f"   ➜ Extracted {char_total} quotes, kept {char_kept}")
 
-        # keep per-character deduplication
-        seen, deduped = set(), []
-        for ex in char_examples:
-            reply = ex["messages"][-1]["content"].strip()
-            if reply not in seen:
-                deduped.append(ex)
-                seen.add(reply)
-
-        examples.extend(deduped)
-
-    return examples
+    # Deduplicate globally
+    seen, filtered = set(), []
+    for ex in examples:
+        reply = ex["messages"][-1]["content"].strip()
+        if reply not in seen:
+            filtered.append(ex)
+            seen.add(reply)
+    return filtered
 
 def build_dataset(seed_file: str, pdf_dir: str, output_file: str, target_size: int = TARGET_SIZE):
     seed_examples = safe_read_jsonl(seed_file)
@@ -284,23 +393,24 @@ def build_dataset(seed_file: str, pdf_dir: str, output_file: str, target_size: i
 
     dataset = []
     dataset.extend(seed_examples[: max(1, int(0.2 * target_size))])
-    dataset.extend(pdf_examples[: int(0.25 * target_size)])
+    dataset.extend(pdf_examples[: int(0.5 * target_size)])
 
     remaining = target_size - len(dataset)
     if remaining > 0:
         print(f"⚙️ Generating {remaining} synthetic examples...")
-        dataset.extend(generate_synthetic_dialogues(remaining, user_prompts))
+        dataset.extend(batch_generate_synthetic_dialogues(remaining, user_prompts))
 
-    # Final dedupe (light safety)
+    # Final dedupe
     seen, final = set(), []
     for ex in dataset:
         reply = ex["messages"][-1]["content"].strip()
         if reply not in seen:
             final.append(ex)
             seen.add(reply)
+
     if len(final) < target_size:
         pad = target_size - len(final)
-        final.extend(generate_synthetic_dialogues(pad, user_prompts))
+        final.extend(batch_generate_synthetic_dialogues(pad, user_prompts))
 
     final = final[:target_size]
     write_jsonl(final, output_file)
