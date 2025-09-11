@@ -26,5 +26,6 @@ aiohttp
 datetime
 regex
 matplotlib
-
-
+yt_dlp
+python-vlc
+spotipy
