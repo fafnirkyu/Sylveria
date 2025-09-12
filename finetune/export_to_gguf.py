@@ -1,38 +1,167 @@
-# export_to_gguf.py
 import os
+import torch
+import subprocess
+import sys
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
+from safetensors.torch import load_file, save_file
 
-BASE_MODEL = "TheBloke/Mythomist-7B-GGUF"
+# ----------------------------
+# Config
+# ----------------------------
+BASE_MODEL = "Gryphe/Mythomist-7B"
 LORA_DIR = "./lora-sylveria"
 MERGED_DIR = "./sylveria-merged"
-
-# Load base + LoRA
-print("🔄 Loading base + LoRA...")
-model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, device_map="auto")
-model = PeftModel.from_pretrained(model, LORA_DIR)
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-
-# Merge LoRA weights into base
-print("🧩 Merging LoRA weights...")
-model = model.merge_and_unload()
-
-# Save merged HF format
-model.save_pretrained(MERGED_DIR)
-tokenizer.save_pretrained(MERGED_DIR)
-
-print(f"✅ Merged model saved to {MERGED_DIR}")
+GGUF_DIR = "./gguf"
+OFFLOAD_DIR = "./offload"
+USE_F16 = True
+LLAMA_CPP_DIR = "./llama.cpp"
 
 # ----------------------------
-# Convert to GGUF
+# Fix adapter keys if needed
 # ----------------------------
-print("📦 Converting to GGUF...")
-os.system(
-    f"python3 -m transformers.models.llama.convert_llama_weights_to_gguf "
-    f"--input_dir {MERGED_DIR} "
-    f"--output_dir ./gguf "
-    f"--model_size 7B "
-    f"--use-f32"  # or use --use-f16 for smaller export
-)
+def fix_lora_keys(lora_dir: str):
+    bin_path = os.path.join(lora_dir, "adapter_model.bin")
+    safetensors_path = os.path.join(lora_dir, "adapter_model.safetensors")
 
-print("✅ GGUF model ready in ./gguf/")
+    if os.path.exists(bin_path):
+        print("🔧 Fixing keys in adapter_model.bin...")
+        state_dict = torch.load(bin_path, map_location="cpu")
+        new_state_dict, changed = _fix_keys(state_dict)
+        if changed:
+            torch.save(new_state_dict, bin_path)
+            print("Keys fixed in adapter_model.bin")
+        else:
+            print("ℹNo changes needed in adapter_model.bin")
+
+    elif os.path.exists(safetensors_path):
+        print("🔧 Fixing keys in adapter_model.safetensors...")
+        state_dict = load_file(safetensors_path)
+        new_state_dict, changed = _fix_keys(dict(state_dict))
+        if changed:
+            tmp_path = safetensors_path + ".fixed"
+            save_file(new_state_dict, tmp_path)
+            os.replace(tmp_path, safetensors_path)
+            print("Keys fixed in adapter_model.safetensors")
+        else:
+            print("ℹNo changes needed in adapter_model.safetensors")
+
+    else:
+        print("No adapter model found in LoRA dir, skipping key fix.")
+
+def _fix_keys(state_dict):
+    new_state_dict = {}
+    changed = False
+    for k, v in state_dict.items():
+        new_k = k
+        if new_k.startswith("base_model.model.model."):
+            new_k = new_k.replace("base_model.model.model.", "base_model.model.", 1)
+            changed = True
+        elif new_k.startswith("model.model."):
+            new_k = new_k.replace("model.model.", "model.", 1)
+            changed = True
+        new_state_dict[new_k] = v
+    return new_state_dict, changed
+
+# ----------------------------
+# Clone llama.cpp if not exists
+# ----------------------------
+def setup_llama_cpp():
+    if not os.path.exists(LLAMA_CPP_DIR):
+        print("Cloning llama.cpp repository...")
+        try:
+            subprocess.run([
+                "git", "clone", "https://github.com/ggerganov/llama.cpp.git", 
+                LLAMA_CPP_DIR
+            ], check=True, shell=True)  # Added shell=True for Windows compatibility
+            print("llama.cpp cloned successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to clone llama.cpp: {e}")
+            sys.exit(1)
+    
+    # Install requirements
+    requirements_path = os.path.join(LLAMA_CPP_DIR, "requirements.txt")
+    if os.path.exists(requirements_path):
+        print("Installing llama.cpp requirements...")
+        try:
+            subprocess.run([
+                sys.executable, "-m", "pip", "install", "-r", requirements_path
+            ], check=True, shell=True)  # Added shell=True for Windows compatibility
+            print("Requirements installed")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install requirements: {e}")
+            sys.exit(1)
+
+# ----------------------------
+# Convert to GGUF using llama.cpp
+# ----------------------------
+def convert_to_gguf_llamacpp(model_path, output_dir, use_f16=True):
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Determine output file path
+    model_name = os.path.basename(model_path)
+    output_file = os.path.join(output_dir, f"{model_name}.gguf")
+    
+    # Build conversion command - use absolute paths
+    convert_script = os.path.abspath(os.path.join(LLAMA_CPP_DIR, "convert_hf_to_gguf.py"))
+    model_path = os.path.abspath(model_path)
+    output_file = os.path.abspath(output_file)
+    
+    outtype = "f16" if use_f16 else "f32"
+    
+    cmd = [
+        sys.executable, convert_script,
+        model_path,
+        "--outtype", outtype,
+        "--outfile", output_file
+    ]
+    
+    print(f"🔄 Converting to GGUF with command: {' '.join(cmd)}")
+    
+    try:
+        # Use shell=True for Windows compatibility
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, shell=True)
+        print("GGUF conversion successful")
+        print(f"GGUF file saved to: {output_file}")
+        return output_file
+    except subprocess.CalledProcessError as e:
+        print(f"GGUF conversion failed: {e}")
+        print(f"stderr: {e.stderr}")
+        sys.exit(1)
+
+# ----------------------------
+# Main execution
+# ----------------------------
+if __name__ == "__main__":
+    print("🔄 Preparing LoRA adapter...")
+    fix_lora_keys(LORA_DIR)
+
+    print("🔄 Loading base model with CPU/disk offloading...")
+    base = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        offload_folder=OFFLOAD_DIR
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+    print("Attaching LoRA adapter...")
+    model = PeftModel.from_pretrained(base, LORA_DIR)
+
+    print("Merging LoRA weights into base...")
+    model = model.merge_and_unload()
+
+    print(f"Saving merged model to {MERGED_DIR}...")
+    model.save_pretrained(MERGED_DIR)
+    tokenizer.save_pretrained(MERGED_DIR)
+    
+    # Setup llama.cpp
+    setup_llama_cpp()
+    
+    # Convert to GGUF
+    print("Converting to GGUF format...")
+    convert_to_gguf_llamacpp(MERGED_DIR, GGUF_DIR, USE_F16)
+
+    print(f"GGUF model ready in {GGUF_DIR}/")
