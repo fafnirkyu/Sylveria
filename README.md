@@ -49,19 +49,26 @@ python finetune/dataset_builder.py
 ```
 This will extract dialogues, rewrite them into Sylveria’s voice, and generate ~5k examples (`sylveria_dataset.jsonl`).
 
-### 3. Run LoRA Training
+### 3. Build Dataset  
+- Run dataset post processing script:
+```bash
+python finetune/postprocess_dataset.py
+```
+This will perform a couple post processing steps to help clean up any erros in the dataset or weird artifacts from the PDF extraction and save a new clean dataset (`sylveria_dataset_cleaned.jsonl`).
+
+### 4. Run LoRA Training
 ```bash
 cd finetune
 python train_lora.py \
   --model mythomist-7b \
-  --dataset sylveria_dataset.jsonl \
+  --dataset sylveria_dataset_cleaned.jsonl \
   --output_dir lora-sylveria
 ```
 
 - Uses Hugging Face `transformers` + `peft` for LoRA.  
 - Trains Sylveria’s unique voice into adapter weights.  
 
-### 4. Export for Local Inference
+### 5. Export for Local Inference
 After training:
 ```bash
 python export_to_gguf.py \
