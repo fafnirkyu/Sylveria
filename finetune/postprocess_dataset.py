@@ -9,13 +9,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 INPUT_FILE = "sylveria_dataset.jsonl"
 OUTPUT_FILE = "sylveria_dataset_cleaned.jsonl"
 PROMPT_FILE = "user_prompts.json"
-MODEL_NAME = "mythomist-7b:Q5_K_M"   # main model for rewriting
-GEN_MODEL = "mythomist-7b:Q5_K_M"             # better for prompt generation
+MODEL_NAME = "mythomist-7b:Q5_K_M"  
+GEN_MODEL = "mythomist-7b:Q5_K_M"           
 REWRITE_TEMP = 0.6
 PROMPT_TEMP = 0.7
 RETRIES = 2
-MAX_WORKERS = 6  # for RTX 3070
-INJECT_PROMPTS = True  # ✅ if True, adds generated prompts to dataset
+MAX_WORKERS = 6 
+INJECT_PROMPTS = True 
 
 # ----------------------------
 # Fallbacks
@@ -153,13 +153,13 @@ def generate_prompts(n=500):
             prompts = [p.strip() for p in arr if 3 <= len(p.split()) <= 12]
             return list(set(prompts))
     except Exception as e:
-        print("⚠️ Prompt generation failed:", e)
+        print("Prompt generation failed:", e)
     return []
 
 def save_prompts(prompts):
     with open(PROMPT_FILE, "w", encoding="utf-8") as f:
         json.dump(prompts, f, ensure_ascii=False, indent=2)
-    print(f"✅ Saved {len(prompts)} prompts to {PROMPT_FILE}")
+    print(f"Saved {len(prompts)} prompts to {PROMPT_FILE}")
 
 # ----------------------------
 # Dataset Processing
@@ -182,7 +182,7 @@ def process_dataset():
         else:
             to_rewrite.append((ex, reply))
 
-    print(f"⚙️ Found {len(to_rewrite)} bad replies to rewrite out of {len(data)}")
+    print(f"Found {len(to_rewrite)} bad replies to rewrite out of {len(data)}")
 
     rewritten = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -212,14 +212,14 @@ def process_dataset():
                         {"role": "assistant", "content": random.choice(FALLBACK_REPLIES)}
                     ]
                 })
-            print(f"✨ Injected {len(prompts)} generated user prompts into dataset")
+            print(f"Injected {len(prompts)} generated user prompts into dataset")
             save_prompts(prompts)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for ex in all_cleaned:
             f.write(json.dumps(ex, ensure_ascii=False) + "\n")
 
-    print(f"\n✅ Cleaned dataset saved to {OUTPUT_FILE}")
+    print(f"\nCleaned dataset saved to {OUTPUT_FILE}")
     print(f"   Total: {len(all_cleaned)} examples")
     print(f"   Fixed: {len(rewritten)} | Already good: {len(cleaned)}")
 
@@ -228,3 +228,4 @@ def process_dataset():
 # ----------------------------
 if __name__ == "__main__":
     process_dataset()
+
