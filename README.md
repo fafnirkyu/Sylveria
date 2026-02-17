@@ -42,40 +42,31 @@ pip install -r requirements.txt
 ```
 
 ### 2. Build Dataset
-- Place character PDFs inside `pdfs/CharacterName/*.pdf`  
+- Add your API key to dataset_builder.py
 - Run dataset builder:
 ```bash
 python finetune/dataset_builder.py
 ```
-This will extract dialogues, rewrite them into Sylveria’s voice, and generate ~5k examples (`sylveria_dataset.jsonl`).
+This produces the training file with 1,000 high-quality dialogue pairs. (`sylveria_dataset.jsonl`).
 
-### 3. Build Dataset  
-- Run dataset post processing script:
+### 3. Run LoRA Training
+- Training is optimized for an 8GB VRAM GPU (like an RTX 3070) using 4-bit quantization and paged optimizers:
 ```bash
-python finetune/postprocess_dataset.py
+python train_lora.py
 ```
-This will perform a couple post processing steps to help clean up any erros in the dataset or weird artifacts from the PDF extraction and save a new clean dataset (`sylveria_dataset_cleaned.jsonl`).
+Base Model: unsloth/gemma-2-2b-it-bnb-4bit.
+Output: Saves adapters to ./sylveria_final_lora.
+Config: Uses Rank 64/Alpha 64 to deeply bake the personality into the model.
 
-### 4. Run LoRA Training
-```bash
-cd finetune
-python train_lora.py \
-  --model mythomist-7b \
-  --dataset sylveria_dataset_cleaned.jsonl \
-  --output_dir lora-sylveria
-```
-
-- Uses Hugging Face `transformers` + `peft` for LoRA.  
-- Trains Sylveria’s unique voice into adapter weights.  
 
 ### 5. Export for Local Inference
 After training:
 ```bash
-python export_to_gguf.py \
-  --base mythomist-7b \
-  --lora lora-sylveria \
-  --out models/sylveria.gguf
+python export_to_gguf.py
 ```
+Merging LoRA weights into the official FP16 google/gemma-2-2b-it base.
+Fixing shared tensor keys to prevent conversion errors.
+Exporting the final model to gguf/sylveria_gemma_2b.gguf.
 
 Now you can load Sylveria locally in **Ollama** or `llama.cpp`:
 ```bash
