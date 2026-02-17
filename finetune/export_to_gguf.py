@@ -7,19 +7,22 @@ from peft import PeftModel
 from safetensors.torch import load_file, save_file
 
 # ----------------------------
-# Config
+# Config for Sylveria Project
 # ----------------------------
-BASE_MODEL = "Gryphe/Mythomist-7B"
-LORA_DIR = "./lora-sylveria"
+# Use the base model used for your fine-tune
+BASE_MODEL = "google/gemma-2-2b-it"
+
+# Point to the specific checkpoint folder where your configs were found
+LORA_DIR = os.path.abspath("./sylveria_outputs_final/checkpoint-300")
+
+# Output directories
 MERGED_DIR = "./sylveria-merged"
 GGUF_DIR = "./gguf"
 OFFLOAD_DIR = "./offload"
 USE_F16 = True
 LLAMA_CPP_DIR = "./llama.cpp"
 
-# ----------------------------
 # Fix adapter keys if needed
-# ----------------------------
 def fix_lora_keys(lora_dir: str):
     bin_path = os.path.join(lora_dir, "adapter_model.bin")
     safetensors_path = os.path.join(lora_dir, "adapter_model.safetensors")
@@ -45,7 +48,6 @@ def fix_lora_keys(lora_dir: str):
             print("Keys fixed in adapter_model.safetensors")
         else:
             print("ℹNo changes needed in adapter_model.safetensors")
-
     else:
         print("No adapter model found in LoRA dir, skipping key fix.")
 
@@ -63,9 +65,7 @@ def _fix_keys(state_dict):
         new_state_dict[new_k] = v
     return new_state_dict, changed
 
-# ----------------------------
 # Clone llama.cpp if not exists
-# ----------------------------
 def setup_llama_cpp():
     if not os.path.exists(LLAMA_CPP_DIR):
         print("Cloning llama.cpp repository...")
@@ -73,37 +73,30 @@ def setup_llama_cpp():
             subprocess.run([
                 "git", "clone", "https://github.com/ggerganov/llama.cpp.git", 
                 LLAMA_CPP_DIR
-            ], check=True, shell=True)  # Added shell=True for Windows compatibility
+            ], check=True, shell=True)
             print("llama.cpp cloned successfully")
         except subprocess.CalledProcessError as e:
             print(f"Failed to clone llama.cpp: {e}")
             sys.exit(1)
     
-    # Install requirements
     requirements_path = os.path.join(LLAMA_CPP_DIR, "requirements.txt")
     if os.path.exists(requirements_path):
         print("Installing llama.cpp requirements...")
         try:
             subprocess.run([
                 sys.executable, "-m", "pip", "install", "-r", requirements_path
-            ], check=True, shell=True)  # Added shell=True for Windows compatibility
+            ], check=True, shell=True)
             print("Requirements installed")
         except subprocess.CalledProcessError as e:
             print(f"Failed to install requirements: {e}")
             sys.exit(1)
 
-# ----------------------------
 # Convert to GGUF using llama.cpp
-# ----------------------------
 def convert_to_gguf_llamacpp(model_path, output_dir, use_f16=True):
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Determine output file path
     model_name = os.path.basename(model_path)
-    output_file = os.path.join(output_dir, f"{model_name}.gguf")
+    output_file = os.path.join(output_dir, f"sylveria_gemma_2b.gguf")
     
-    # Build conversion command - use absolute paths
     convert_script = os.path.abspath(os.path.join(LLAMA_CPP_DIR, "convert_hf_to_gguf.py"))
     model_path = os.path.abspath(model_path)
     output_file = os.path.abspath(output_file)
@@ -117,11 +110,10 @@ def convert_to_gguf_llamacpp(model_path, output_dir, use_f16=True):
         "--outfile", output_file
     ]
     
-    print(f"🔄 Converting to GGUF with command: {' '.join(cmd)}")
+    print(f"Converting to GGUF with command: {' '.join(cmd)}")
     
     try:
-        # Use shell=True for Windows compatibility
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, shell=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, shell=True)
         print("GGUF conversion successful")
         print(f"GGUF file saved to: {output_file}")
         return output_file
@@ -134,10 +126,15 @@ def convert_to_gguf_llamacpp(model_path, output_dir, use_f16=True):
 # Main execution
 # ----------------------------
 if __name__ == "__main__":
-    print("🔄 Preparing LoRA adapter...")
+    if not os.path.exists(LORA_DIR):
+        print(f"Error: Could not find LoRA folder at {LORA_DIR}")
+        sys.exit(1)
+
+    print("Preparing LoRA adapter...")
     fix_lora_keys(LORA_DIR)
 
-    print("🔄 Loading base model with CPU/disk offloading...")
+    print("Loading base model with CPU/disk offloading...")
+    # Using float16 for merging to save VRAM on your 3070
     base = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
         torch_dtype=torch.float16,
@@ -153,14 +150,19 @@ if __name__ == "__main__":
     print("Merging LoRA weights into base...")
     model = model.merge_and_unload()
 
-    print(f"Saving merged model to {MERGED_DIR}...")
-    model.save_pretrained(MERGED_DIR)
+    # --- FIX FOR DUPLICATE TENSORS ---
+    print(f"Saving merged model to {MERGED_DIR} (cleaning duplicates)...")
+    # Ensuring the model is in a standard state
+    model.tie_weights() 
+    model.save_pretrained(
+        MERGED_DIR, 
+        safe_serialization=True, # Use .safetensors format
+        max_shard_size="10GB"    # Keep it in fewer files to avoid index confusion
+    )
     tokenizer.save_pretrained(MERGED_DIR)
     
-    # Setup llama.cpp
     setup_llama_cpp()
     
-    # Convert to GGUF
     print("Converting to GGUF format...")
     convert_to_gguf_llamacpp(MERGED_DIR, GGUF_DIR, USE_F16)
 

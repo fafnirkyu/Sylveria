@@ -3,23 +3,20 @@ import ollama
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ----------------------------
+
 # CONFIG
-# ----------------------------
 INPUT_FILE = "sylveria_dataset.jsonl"
 OUTPUT_FILE = "sylveria_dataset_cleaned.jsonl"
 PROMPT_FILE = "user_prompts.json"
-MODEL_NAME = "mythomist-7b:Q5_K_M"  
-GEN_MODEL = "mythomist-7b:Q5_K_M"           
+MODEL_NAME = "mythomist-7b:Q5_K_M"   
+GEN_MODEL = "mythomist-7b:Q5_K_M"             
 REWRITE_TEMP = 0.6
 PROMPT_TEMP = 0.7
 RETRIES = 2
-MAX_WORKERS = 6 
-INJECT_PROMPTS = True 
+MAX_WORKERS = 6  
+INJECT_PROMPTS = True  
 
-# ----------------------------
 # Fallbacks
-# ----------------------------
 FALLBACK_REPLIES = [
     "Always, Fafnir. You are my treasure.",
     "Even the stars envy what we share.",
@@ -41,9 +38,7 @@ MYTHIC_WORDS = [
 
 FAFNIR_PROB = 0.35
 
-# ----------------------------
 # Helpers
-# ----------------------------
 def call_model(prompt: str, model=MODEL_NAME, temp=REWRITE_TEMP, retries=RETRIES) -> str:
     """Wrapper for Ollama chat with retries"""
     for _ in range(retries + 1):
@@ -74,9 +69,8 @@ def clean_reply(text: str) -> str:
         return ""
     return t
 
-# ----------------------------
+
 # Style Enhancement
-# ----------------------------
 def adjust_sentence_length(text: str, target_range) -> str:
     words = text.split()
     if len(words) < target_range[0]:
@@ -101,9 +95,7 @@ def enhance_reply(reply: str) -> str:
         target = (21, 30)
     return adjust_sentence_length(reply, target)
 
-# ----------------------------
 # Rewrite Bad Replies
-# ----------------------------
 def rewrite_as_sylveria(line: str) -> str:
     prompt = (
         "Rewrite the following line in the voice of Sylveria, "
@@ -117,9 +109,8 @@ def rewrite_as_sylveria(line: str) -> str:
     out = call_model(prompt)
     return clean_reply(out) or random.choice(FALLBACK_REPLIES)
 
-# ----------------------------
+
 # Prompt Generator
-# ----------------------------
 def generate_prompts(n=500):
     prompt = (
         f"Generate {n} short user prompts for a bonded, loving dragon companion.\n"
@@ -161,9 +152,8 @@ def save_prompts(prompts):
         json.dump(prompts, f, ensure_ascii=False, indent=2)
     print(f"Saved {len(prompts)} prompts to {PROMPT_FILE}")
 
-# ----------------------------
+
 # Dataset Processing
-# ----------------------------
 def process_dataset():
     with open(INPUT_FILE, "r", encoding="utf-8") as f:
         data = [json.loads(line) for line in f]
@@ -212,7 +202,7 @@ def process_dataset():
                         {"role": "assistant", "content": random.choice(FALLBACK_REPLIES)}
                     ]
                 })
-            print(f"Injected {len(prompts)} generated user prompts into dataset")
+            print(f"✨ Injected {len(prompts)} generated user prompts into dataset")
             save_prompts(prompts)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -223,9 +213,7 @@ def process_dataset():
     print(f"   Total: {len(all_cleaned)} examples")
     print(f"   Fixed: {len(rewritten)} | Already good: {len(cleaned)}")
 
-# ----------------------------
+
 # Run
-# ----------------------------
 if __name__ == "__main__":
     process_dataset()
-
